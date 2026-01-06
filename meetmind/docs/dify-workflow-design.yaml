@@ -1,0 +1,315 @@
+# ============================================================
+# MeetMind 学习引导 Agent - Dify Workflow 设计
+# ============================================================
+# 
+# 功能：卡点诊断 → 分流提问 → 针对性解释
+# 特点：可交互、可中断追问、结构化 JSON 输出
+#
+# 在 Dify 中导入此设计，创建对应的工作流
+# ============================================================
+
+workflow:
+  name: "MeetMind 学习引导 Agent"
+  description: "帮助学生诊断学习卡点，通过引导问题定位具体困惑"
+  version: "1.0.0"
+
+# ==================== 输入变量 ====================
+inputs:
+  - name: timestamp
+    type: string
+    required: true
+    description: "困惑点时间戳（毫秒）"
+  
+  - name: context
+    type: string
+    required: true
+    description: "课堂转录上下文"
+  
+  - name: subject
+    type: string
+    required: false
+    default: "数学"
+    description: "学科"
+  
+  - name: enable_guidance
+    type: string
+    required: false
+    default: "false"
+    description: "是否启用引导问题"
+  
+  - name: enable_web
+    type: string
+    required: false
+    default: "false"
+    description: "是否启用联网检索"
+  
+  - name: selected_option_id
+    type: string
+    required: false
+    description: "学生选择的选项 ID"
+  
+  - name: student_question
+    type: string
+    required: false
+    description: "学生追问内容"
+
+# ==================== 输出变量 ====================
+outputs:
+  - name: answer
+    type: string
+    description: "主回答内容"
+  
+  - name: guidance_question
+    type: string
+    description: "引导问题 JSON"
+  
+  - name: option_followup
+    type: string
+    description: "针对选项的补充解释"
+  
+  - name: citations
+    type: string
+    description: "引用来源 JSON 数组"
+  
+  - name: model
+    type: string
+    description: "使用的模型"
+  
+  - name: total_tokens
+    type: number
+    description: "消耗的 token 数"
+
+# ==================== 工作流节点 ====================
+nodes:
+
+  # ----- 节点 1: 开始 -----
+  - id: start
+    type: start
+    title: "开始"
+    next: condition_check_mode
+
+  # ----- 节点 2: 条件判断 - 模式分流 -----
+  - id: condition_check_mode
+    type: condition
+    title: "判断运行模式"
+    conditions:
+      - condition: "{{ selected_option_id != '' }}"
+        next: llm_option_followup
+        label: "选项追问模式"
+      - condition: "{{ enable_guidance == 'true' }}"
+        next: llm_generate_guidance
+        label: "生成引导问题"
+      - condition: "default"
+        next: llm_main_answer
+        label: "普通回答模式"
+
+  # ----- 节点 3: LLM - 生成引导问题 -----
+  - id: llm_generate_guidance
+    type: llm
+    title: "生成引导问题"
+    model: "qwen-max"
+    prompt: |
+      你是一位专业的学习诊断专家。根据学生的困惑点和课堂内容，生成一个诊断性问题。
+
+      【课堂内容】
+      {{ context }}
+
+      【困惑时间点】
+      {{ timestamp }} 毫秒处
+
+      【任务】
+      生成一个单选题，帮助判断学生具体卡在哪里。
+
+      【输出要求】
+      严格按以下 JSON 格式输出，不要有任何其他内容：
+      ```json
+      {
+        "id": "guidance-1",
+        "question": "你觉得自己主要卡在哪个环节？",
+        "type": "single_choice",
+        "options": [
+          {"id": "opt-1", "text": "选项1内容", "category": "concept"},
+          {"id": "opt-2", "text": "选项2内容", "category": "procedure"},
+          {"id": "opt-3", "text": "选项3内容", "category": "calculation"}
+        ],
+        "hint": "选择最符合你情况的选项"
+      }
+      ```
+
+      【category 说明】
+      - concept: 概念理解问题
+      - procedure: 步骤方法问题
+      - calculation: 计算过程问题
+      - comprehension: 审题理解问题
+      - application: 实际应用问题
+
+      【注意】
+      - 选项数量 2-4 个
+      - 问题要具体，针对当前知识点
+      - 不要问开放性大题
+    output_variable: guidance_question_raw
+    next: code_parse_guidance
+
+  # ----- 节点 4: 代码 - 解析引导问题 -----
+  - id: code_parse_guidance
+    type: code
+    title: "解析引导问题 JSON"
+    language: python
+    code: |
+      import json
+      import re
+      
+      def main(guidance_question_raw: str) -> dict:
+          # 提取 JSON
+          json_match = re.search(r'```json\s*([\s\S]*?)\s*```', guidance_question_raw)
+          if json_match:
+              json_str = json_match.group(1)
+          else:
+              json_str = guidance_question_raw
+          
+          try:
+              parsed = json.loads(json_str)
+              return {
+                  "guidance_question": json.dumps(parsed, ensure_ascii=False),
+                  "parse_success": True
+              }
+          except:
+              return {
+                  "guidance_question": "",
+                  "parse_success": False
+              }
+    inputs:
+      - guidance_question_raw
+    outputs:
+      - guidance_question
+      - parse_success
+    next: condition_check_web
+
+  # ----- 节点 5: 条件判断 - 是否联网 -----
+  - id: condition_check_web
+    type: condition
+    title: "是否需要联网检索"
+    conditions:
+      - condition: "{{ enable_web == 'true' }}"
+        next: tool_web_search
+        label: "需要联网"
+      - condition: "default"
+        next: llm_main_answer
+        label: "不需要联网"
+
+  # ----- 节点 6: 工具 - 联网检索 -----
+  - id: tool_web_search
+    type: tool
+    title: "联网检索"
+    tool_name: "web_search"
+    tool_config:
+      query: "{{ subject }} {{ context | truncate(100) }}"
+      max_results: 5
+    output_variable: web_results
+    next: code_format_citations
+
+  # ----- 节点 7: 代码 - 格式化引用 -----
+  - id: code_format_citations
+    type: code
+    title: "格式化引用来源"
+    language: python
+    code: |
+      import json
+      
+      def main(web_results: list) -> dict:
+          citations = []
+          for i, result in enumerate(web_results[:5]):
+              citations.append({
+                  "id": f"cite-{i+1}",
+                  "title": result.get("title", ""),
+                  "url": result.get("url", ""),
+                  "snippet": result.get("snippet", "")[:200],
+                  "source_type": "web"
+              })
+          return {
+              "citations": json.dumps(citations, ensure_ascii=False)
+          }
+    inputs:
+      - web_results
+    outputs:
+      - citations
+    next: llm_main_answer
+
+  # ----- 节点 8: LLM - 主回答 -----
+  - id: llm_main_answer
+    type: llm
+    title: "生成主回答"
+    model: "qwen-max"
+    prompt: |
+      你是一位亲切的 AI 家教，帮助学生理解课堂内容。
+
+      【课堂内容】
+      {{ context }}
+
+      【学科】
+      {{ subject }}
+
+      {% if student_question %}
+      【学生问题】
+      {{ student_question }}
+      {% endif %}
+
+      请用简洁、易懂的语言回答学生的困惑。
+    output_variable: answer
+    next: end
+
+  # ----- 节点 9: LLM - 选项追问 -----
+  - id: llm_option_followup
+    type: llm
+    title: "针对选项的补充解释"
+    model: "qwen-max"
+    prompt: |
+      学生选择了选项 {{ selected_option_id }}，表示他/她的困惑点在这个方面。
+
+      【课堂内容】
+      {{ context }}
+
+      【任务】
+      针对学生选择的卡点，给出一段简短的针对性建议（2-3句话）。
+      格式：「针对你刚才选择的选项，我建议你先……」
+    output_variable: option_followup
+    next: end
+
+  # ----- 节点 10: 结束 -----
+  - id: end
+    type: end
+    title: "结束"
+    outputs:
+      - answer: "{{ answer }}"
+      - guidance_question: "{{ guidance_question }}"
+      - option_followup: "{{ option_followup }}"
+      - citations: "{{ citations }}"
+      - model: "qwen-max"
+      - total_tokens: "{{ _system.total_tokens }}"
+
+# ==================== 使用说明 ====================
+# 
+# 1. 在 Dify 控制台创建新的 Workflow 应用
+# 2. 按照上述节点设计搭建工作流
+# 3. 配置 LLM 节点使用的模型（推荐 qwen-max 或 gpt-4）
+# 4. 配置 Web Search 工具（如 SerpAPI、Bing Search 等）
+# 5. 发布工作流，获取 API Key 和 Workflow ID
+# 6. 在 MeetMind 的 .env.local 中配置：
+#    - DIFY_API_URL=https://api.dify.ai/v1 (或你的私有部署地址)
+#    - DIFY_API_KEY=your-api-key
+#    - DIFY_WORKFLOW_ID=your-workflow-id
+#
+# ==================== API 调用示例 ====================
+#
+# POST /v1/workflows/run
+# {
+#   "inputs": {
+#     "timestamp": "60000",
+#     "context": "老师讲解二次函数...",
+#     "subject": "数学",
+#     "enable_guidance": "true",
+#     "enable_web": "false"
+#   },
+#   "response_mode": "blocking",
+#   "user": "student-123"
+# }

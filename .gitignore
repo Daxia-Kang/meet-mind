@@ -1,0 +1,32 @@
+﻿# 忽略大文件（100MB 以上，避免 GitHub 限制）
+[!.]*.node
+*.exe
+*.dll
+*.zip
+*.tar.gz
+*.iso
+
+# 忽略依赖目录（无需跟踪，npm install 可恢复）
+node_modules/
+meetmind/node_modules/
+
+# 忽略数据库文件（体积大+易损坏）
+surreal_data/
+notebook_data/
+*.sqlite
+*.db/
+
+# 忽略编译产物和缓存（无用）
+.dist/
+.build/
+.next/
+.out/
+*.log
+.cache/
+
+# 忽略编辑器和环境文件（本地专用）
+.vscode/
+.env
+.env.local
+.DS_Store
+Thumbs.db
